@@ -23,7 +23,7 @@ import streamlit as st
 st.set_page_config(page_title="우리집 플레이", page_icon="🏡", layout="centered")
 POINTS = 30
 SHOP = {"용돈 부탁":150,"설거지 부탁":90,"방 청소 부탁":120,"간식 선택권":60,"영화 선택권":60,"기타 부탁":100}
-GAMES = {"오목":(9,9,5),"삼목":(3,3,3),"사목":(6,7,4),"주사위 대결":(1,1,0)}
+GAMES = {"오목":(9,9,5),"삼목":(3,3,3),"사목":(6,7,4),"주사위 대결":(1,1,0),"가위바위보":(1,1,0),"업다운 숫자 맞히기":(1,1,0),"31 피하기":(1,1,0),"동전 맞히기":(1,1,0)}
 
 def stamp(): return datetime.now(timezone.utc).isoformat(timespec="seconds")
 def uid(): return uuid.uuid4().hex
@@ -84,7 +84,7 @@ def new_match(game,owner,opponent):
 
 def expand_board(room, match_id, actor, expected):
     m=room["matches"].get(match_id)
-    if not m or m["status"]!="진행" or m["game"]=="주사위 대결":
+    if not m or m["status"]!="진행" or m["game"] not in ("오목","삼목","사목"):
         raise ValueError("진행 중인 보드 게임에서만 칸을 늘릴 수 있어요.")
     if m["moves"]!=expected or m["players"][m["turn"]]!=actor:
         raise ValueError("내 차례에 최신 화면에서 눌러 주세요.")
@@ -114,9 +114,48 @@ def move(room,match_id,actor,expected,col=None,row=None):
     m=room["matches"].get(match_id)
     if not m or m["status"]!="진행": raise ValueError("이미 끝났거나 시작 전인 게임이에요.")
     if m["moves"]!=expected: raise ValueError("화면이 갱신되었어요. 현재 차례를 확인해 주세요.")
+    if actor not in m["players"]: raise ValueError("참가 선수만 플레이할 수 있어요.")
+    if m["game"]=="가위바위보":
+        if type(col) is not int or col not in (0,1,2): raise ValueError("가위·바위·보 중 골라 주세요.")
+        choices=m.setdefault("choices",{})
+        if actor in choices: raise ValueError("이미 선택했어요. 상대방을 기다려 주세요.")
+        choices[actor]=col;m["moves"]+=1
+        if len(choices)==2:
+            a,b=[choices[p] for p in m["players"]]
+            result=None if a==b else (0 if (a-b)%3==1 else 1)
+            if result is not None:m["scores"][result]+=1
+            m.setdefault("rps_history",[]).append([a,b,result])
+            m["choices"]={}
+            if max(m["scores"])>=3:
+                finish(room,m,m["players"][m["scores"].index(3)],"가위바위보 3승 달성")
+        return
     if m["players"][m["turn"]]!=actor: raise ValueError("상대방 차례예요.")
     t=m["turn"]
-    if m["game"]=="주사위 대결":
+    if m["game"]=="업다운 숫자 맞히기":
+        low,high=m.get("low",1),m.get("high",100)
+        if type(col) is not int or not low<=col<=high: raise ValueError("현재 범위 안의 숫자를 입력해 주세요.")
+        target=m.setdefault("target",secrets.randbelow(100)+1)
+        m["moves"]+=1
+        hint="정답" if col==target else ("UP ↑" if col<target else "DOWN ↓")
+        m.setdefault("guesses",[]).append([actor,col,hint])
+        if col==target:finish(room,m,actor,"비밀 숫자 정답!")
+        elif col<target:m["low"]=col+1
+        else:m["high"]=col-1
+    elif m["game"]=="31 피하기":
+        count=m.get("count",0)
+        if type(col) is not int or not 1<=col<=min(3,31-count):raise ValueError("부를 숫자 개수는 1~3개예요.")
+        m["count"]=count+col;m["moves"]+=1
+        m.setdefault("count_history",[]).append([actor,list(range(count+1,count+col+1))])
+        if m["count"]==31:finish(room,m,m["players"][1-t],"상대가 31을 불렀어요!")
+    elif m["game"]=="동전 맞히기":
+        if type(col) is not int or col not in (0,1):raise ValueError("앞면 또는 뒷면을 골라 주세요.")
+        outcome=secrets.randbelow(2)
+        m["scores"][t]+=int(col==outcome);m["moves"]+=1
+        m.setdefault("coin_history",[]).append([actor,col,outcome])
+        if m["moves"]==10:
+            a,b=m["scores"]
+            finish(room,m,None if a==b else m["players"][0 if a>b else 1],"각자 5회 동전 맞히기 종료")
+    elif m["game"]=="주사위 대결":
         dice=[secrets.randbelow(6)+1,secrets.randbelow(6)+1]
         m["scores"][t]+=sum(dice); m["rolls"].append([actor,dice]); m["moves"]+=1
         if m["moves"]==6:
@@ -298,10 +337,46 @@ def live():
         st.write(f'⚫ {who(m["players"][0])} vs 🔴 {who(m["players"][1])}')
         if m["status"]=="초대":
             st.info("상대방의 수락을 기다리고 있어요. 상대방 홈에서 초대를 수락하면 시작돼요.");return
-        myturn=m["players"][m["turn"]]==me
+        myturn=(me not in m.get("choices",{})) if m["game"]=="가위바위보" else m["players"][m["turn"]]==me
         st.info("내 차례예요!" if myturn else f'{who(m["players"][m["turn"]])} 차례 · 자동 갱신 중')
         expected=m["moves"]
-        if m["game"]=="주사위 대결":
+        if m["game"]=="가위바위보":
+            st.caption("상대의 선택은 둘 다 고를 때까지 비밀! 먼저 3승하면 승리해요. 비기면 다시 골라요.")
+            for i,c in enumerate(st.columns(2)):c.metric(who(m["players"][i]),f'{m["scores"][i]}승')
+            for choice,c in enumerate(st.columns(3)):
+                if c.button(["✌️ 가위","✊ 바위","🖐️ 보"][choice],disabled=not myturn,key=f"rps_{choice}",use_container_width=True):
+                    if perform(move,mid,me,expected,choice):st.rerun()
+            if not myturn:st.info("선택 완료! 상대방 선택을 기다려요.")
+            for a,b,result in m.get("rps_history",[])[-5:]:
+                st.write(f'{who(m["players"][0])}: {["가위","바위","보"][a]} / {who(m["players"][1])}: {["가위","바위","보"][b]} → {"무승부" if result is None else who(m["players"][result])+" 승"}')
+        elif m["game"]=="업다운 숫자 맞히기":
+            low,high=m.get("low",1),m.get("high",100)
+            st.caption("1~100 사이 비밀 숫자를 번갈아 맞혀요. UP은 더 크게, DOWN은 더 작게! 먼저 맞히면 승리해요.")
+            st.metric("현재 정답 범위",f"{low} ~ {high}")
+            with st.form(f"guess_{mid}_{expected}"):
+                number=st.number_input("추측 숫자",min_value=low,max_value=high,value=low,step=1)
+                guess=st.form_submit_button("정답 도전",disabled=not myturn,use_container_width=True)
+            if guess:
+                if perform(move,mid,me,expected,int(number)):st.rerun()
+            for player,number,hint in m.get("guesses",[])[-8:]:st.write(f"{who(player)}: {number} → {hint}")
+        elif m["game"]=="31 피하기":
+            st.caption("1부터 순서대로 한 번에 1~3개의 숫자를 불러요. 31을 부르면 패배!")
+            count=m.get("count",0);st.metric("마지막으로 부른 숫자",count)
+            for amount,c in enumerate(st.columns(3),1):
+                end=count+amount
+                if c.button(" · ".join(str(x) for x in range(count+1,end+1)),key=f"count_{amount}",disabled=not myturn or end>31,use_container_width=True):
+                    if perform(move,mid,me,expected,amount):st.rerun()
+            for player,numbers in m.get("count_history",[])[-6:]:st.write(f'{who(player)}: {", ".join(map(str,numbers))}')
+        elif m["game"]=="동전 맞히기":
+            st.caption("앞면? 뒷면? 번갈아 각자 5번 예측해서 더 많이 맞히면 승리! 동점은 무승부예요.")
+            st.write(f'{m["moves"]} / 10회 진행')
+            for i,c in enumerate(st.columns(2)):c.metric(who(m["players"][i]),f'{m["scores"][i]}점')
+            for choice,c in enumerate(st.columns(2)):
+                if c.button(["🪙 앞면","🪙 뒷면"][choice],key=f"coin_{choice}",disabled=not myturn,use_container_width=True):
+                    if perform(move,mid,me,expected,choice):st.rerun()
+            for player,guess,outcome in m.get("coin_history",[])[-6:]:
+                st.write(f'{who(player)}: {["앞면","뒷면"][guess]} 선택 → 결과 {["앞면","뒷면"][outcome]} · {"정답!" if guess==outcome else "아쉬워요"}')
+        elif m["game"]=="주사위 대결":
             st.caption("각자 주사위 2개를 세 번 던져요. 합계가 크면 승리! 동점은 무승부예요.")
             a,b=st.columns(2)
             for i,c in enumerate((a,b)): c.metric(who(m["players"][i]),m["scores"][i])
@@ -361,8 +436,8 @@ def live():
         others=[p for p in people if p!=me]
         if others:
             st.markdown("### 🎮 하고 싶은 게임을 골라 주세요")
-            game=st.radio("게임 선택",list(GAMES),key="selected_game",horizontal=True)
-            st.info({"오목":"⚫ 5개를 연결하는 오목 · 9×9에서 시작 / 확장 가능", "삼목":"⭕ 간단한 3개 연결 게임 · 3×3에서 시작 / 확장 가능", "사목":"🔴 돌을 아래로 떨어뜨려 4개 연결 · 확장 가능", "주사위 대결":"🎲 한 번씩 버튼만 누르면 OK! 각자 3회 주사위 합계 대결"}[game])
+            game=st.selectbox("🎮 8가지 게임 중 선택",list(GAMES),key="selected_game")
+            st.info({"오목":"⚫ 5개를 연결하는 오목 · 9×9에서 시작 / 확장 가능", "삼목":"⭕ 간단한 3개 연결 게임 · 3×3에서 시작 / 확장 가능", "사목":"🔴 돌을 아래로 떨어뜨려 4개 연결 · 확장 가능", "주사위 대결":"🎲 한 번씩 버튼만 누르면 OK! 각자 3회 주사위 합계 대결", "가위바위보":"✌️ 상대 선택은 비밀! 먼저 3승하면 승리", "업다운 숫자 맞히기":"🔢 1~100 비밀 숫자를 힌트를 보고 먼저 맞히기", "31 피하기":"💣 숫자를 1~3개씩 불러요. 31을 부르면 패배!", "동전 맞히기":"🪙 앞면과 뒷면 예측! 각자 5번 중 더 많이 맞히기"}[game])
             with st.form("challenge"):
                 opponent=st.selectbox("함께할 가족",others,format_func=who)
                 st.write(f"선택한 게임: **{game}**")
